@@ -1,3 +1,15 @@
+# Experimental Windows guest-stack workaround
+
+This fork preserves the upstream **v20261017** source and includes a reproducible
+patch for its released Windows executable. Start with
+[the workaround instructions](WINDOWS-STACK-FIX.md).
+
+The patch is currently a version-specific binary patcher. Building the C++ source
+normally does **not** include it. It is not an official upstream release.
+Brief gameplay succeeded on the reporting PC; long-session stability is unproven.
+
+---
+
 > [!NOTE]
 > **This fork is tuned for Demon's Souls.** Its renderer, shader and memory paths are optimized for
 > **Demon's Souls (PS5, PPSA01341), game versions 1.07 (01.007.000) and 1.05 (01.005.000)**: both are
