@@ -1540,6 +1540,28 @@ bool TryReadPrtBacking(uint64_t vaddr, void* data, uint64_t size, const char** f
 	return true;
 }
 
+bool TryReadImageBacking(uint64_t vaddr, void* data, uint64_t size, const char** failure_reason) {
+	const char* reason = nullptr;
+	bool read = TryReadBacking(vaddr, data, size) || TryReadPrtBacking(vaddr, data, size, &reason);
+	// The strict PRT reader has already verified that the entire span lies in a
+	// registered aperture. An image can outlive the logical reservation of some
+	// of its streamed layers. Read through the backing store's locked sparse
+	// snapshot rather than guest pointers; only unmapped bytes become zeros.
+	if (!read && reason != nullptr && std::strcmp(reason, "missing-logical-ownership") == 0) {
+		read = TryReadMappedOrZero(vaddr, data, size);
+		if (read) {
+			static std::atomic_uint32_t reports {0};
+			if (reports.fetch_add(1, std::memory_order_relaxed) < 16)
+				std::printf("Image backing: sparse PRT snapshot after released ownership: address=0x%016" PRIx64
+				            " size=0x%016" PRIx64 " (resident bytes kept, unmapped bytes zeroed)\n", vaddr, size);
+		} else {
+			reason = "sparse-backing-copy-failed";
+		}
+	}
+	if (failure_reason != nullptr) *failure_reason = read ? nullptr : reason;
+	return read;
+}
+
 static bool SelfTestSub64SharedPlaceholderAlias() {
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
 	constexpr uint64_t PageSize    = 0x4000;

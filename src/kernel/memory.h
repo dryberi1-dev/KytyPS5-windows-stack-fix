@@ -162,6 +162,11 @@ bool                   TryReadMappedOrZero(uint64_t vaddr, void* data, uint64_t 
 bool                   RestoreGuestWritable(uint64_t vaddr, uint64_t size);
 bool                   TryReadPrtBacking(uint64_t vaddr, void* data, uint64_t size,
                                          const char** failure_reason = nullptr);
+// Image uploads may span released parts of a streamed PRT pool. Keep resident
+// bytes and zero holes, as the asynchronous image upload path already does.
+// Strict PRT ownership queries above retain their existing semantics.
+bool                   TryReadImageBacking(uint64_t vaddr, void* data, uint64_t size,
+                                           const char** failure_reason = nullptr);
 [[nodiscard]] uint64_t ClampRangeSize(uint64_t vaddr, uint64_t size);
 // The end of the guest mapping (one committed virtual range) `vaddr` lies in; 0 when none.
 [[nodiscard]] uint64_t MappingEnd(uint64_t vaddr);
