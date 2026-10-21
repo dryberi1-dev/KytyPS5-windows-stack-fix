@@ -3361,11 +3361,27 @@ void PipelineCache::InitializeDriverCache() {
 	// SmallSaveSeconds while compiles go on: a session that never settles 20 s and does not exit cleanly kept none of them.
 	const uint64_t ram       = LocalPlatform::PhysicalMemory();
 	const bool     store     = m_static_binaries != nullptr || m_static_blobs != nullptr;
-	const auto     ram_limit = [ram, store](uint64_t limit) {
-		constexpr uint64_t StoreLimit = uint64_t {256} << 20u;
+	// A present static store need not cover this build's pipelines. In that case the
+	// driver cache can exceed 256 MiB in ordinary play, and discarding it on every
+	// launch makes the same pipelines compile again. Allow a bounded, explicit
+	// override; retain the RAM-dependent ceiling and the existing default.
+	uint64_t store_limit = uint64_t {256} << 20u;
+	if (const char* value = std::getenv("KYTY_DRIVER_CACHE_MIB"); value != nullptr && *value != '\0') {
+		uint32_t mib = 0;
+		const auto end = value + std::strlen(value);
+		const auto parsed = std::from_chars(value, end, mib);
+		if (parsed.ec == std::errc {} && parsed.ptr == end && mib >= 64 && mib <= 2048) {
+			store_limit = uint64_t {mib} << 20u;
+		} else {
+			PipelineCacheLog("KYTY_DRIVER_CACHE_MIB ignored: expected an integer from 64 to 2048");
+		}
+	}
+	const auto     ram_limit = [ram, store, store_limit](uint64_t limit) {
 		if (ram != 0) limit = std::min(limit, ram >= (uint64_t {24} << 30u) ? ram / 16u : uint64_t {512} << 20u);
-		return store ? std::min(limit, StoreLimit) : limit;
+		return store ? std::min(limit, store_limit) : limit;
 	};
+	PipelineCacheLog("Vulkan pipeline cache: load limit {} MiB per cache (static store {})",
+	                 ram_limit(uint64_t {2} << 30u) >> 20u, store ? "present" : "absent");
 	m_driver_cache = LoadDriverCache(m_driver_cache_path, ram_limit(uint64_t {2} << 30u), m_driver_cache_saved_size);
 	if (m_driver_cache == nullptr) return;
 #ifndef KYTY_STATIC_PRECOMPILE
