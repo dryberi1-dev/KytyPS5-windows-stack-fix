@@ -1,0 +1,112 @@
+diff --git a/src/graphics/host_gpu/renderer/cache/bufferCache.cpp b/src/graphics/host_gpu/renderer/cache/bufferCache.cpp
+index 585241d..497fa27 100644
+--- a/src/graphics/host_gpu/renderer/cache/bufferCache.cpp
++++ b/src/graphics/host_gpu/renderer/cache/bufferCache.cpp
+@@ -2356,8 +2356,7 @@ std::pair<Buffer*, uint64_t> BufferCache::ObtainBufferForImage(uint64_t vaddr, u
+ 	}
+ 	const char* prt_failure = "not-attempted";
+ 	ApplyImageProtects();
+-	if (staging == nullptr || (!Libs::LibKernel::Memory::TryReadBacking(vaddr, staging, size) &&
+-	                           !Libs::LibKernel::Memory::TryReadPrtBacking(vaddr, staging, size, &prt_failure))) {
++	if (staging == nullptr || !Libs::LibKernel::Memory::TryReadImageBacking(vaddr, staging, size, &prt_failure)) {
+ 		EXIT("BufferCache: failed to read mapped guest image backing: "
+ 		     "address=0x%016" PRIx64 " size=0x%016" PRIx64
+ 		     " staging=%p staging_capacity=0x%016" PRIx64 " mapped=%u prt_failure=%s\n",
+diff --git a/src/kernel/memory.cpp b/src/kernel/memory.cpp
+index 43821a8..855e2a8 100644
+--- a/src/kernel/memory.cpp
++++ b/src/kernel/memory.cpp
+@@ -1540,6 +1540,28 @@ bool TryReadPrtBacking(uint64_t vaddr, void* data, uint64_t size, const char** f
+ 	return true;
+ }
+ 
++bool TryReadImageBacking(uint64_t vaddr, void* data, uint64_t size, const char** failure_reason) {
++	const char* reason = nullptr;
++	bool read = TryReadBacking(vaddr, data, size) || TryReadPrtBacking(vaddr, data, size, &reason);
++	// The strict PRT reader has already verified that the entire span lies in a
++	// registered aperture. An image can outlive the logical reservation of some
++	// of its streamed layers. Read through the backing store's locked sparse
++	// snapshot rather than guest pointers; only unmapped bytes become zeros.
++	if (!read && reason != nullptr && std::strcmp(reason, "missing-logical-ownership") == 0) {
++		read = TryReadMappedOrZero(vaddr, data, size);
++		if (read) {
++			static std::atomic_uint32_t reports {0};
++			if (reports.fetch_add(1, std::memory_order_relaxed) < 16)
++				std::printf("Image backing: sparse PRT snapshot after released ownership: address=0x%016" PRIx64
++				            " size=0x%016" PRIx64 " (resident bytes kept, unmapped bytes zeroed)\n", vaddr, size);
++		} else {
++			reason = "sparse-backing-copy-failed";
++		}
++	}
++	if (failure_reason != nullptr) *failure_reason = read ? nullptr : reason;
++	return read;
++}
++
+ static bool SelfTestSub64SharedPlaceholderAlias() {
+ #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+ 	constexpr uint64_t PageSize    = 0x4000;
+diff --git a/src/kernel/memory.h b/src/kernel/memory.h
+index cd3aa42..57b34fd 100644
+--- a/src/kernel/memory.h
++++ b/src/kernel/memory.h
+@@ -162,6 +162,11 @@ bool                   TryReadMappedOrZero(uint64_t vaddr, void* data, uint64_t
+ bool                   RestoreGuestWritable(uint64_t vaddr, uint64_t size);
+ bool                   TryReadPrtBacking(uint64_t vaddr, void* data, uint64_t size,
+                                          const char** failure_reason = nullptr);
++// Image uploads may span released parts of a streamed PRT pool. Keep resident
++// bytes and zero holes, as the asynchronous image upload path already does.
++// Strict PRT ownership queries above retain their existing semantics.
++bool                   TryReadImageBacking(uint64_t vaddr, void* data, uint64_t size,
++                                           const char** failure_reason = nullptr);
+ [[nodiscard]] uint64_t ClampRangeSize(uint64_t vaddr, uint64_t size);
+ // The end of the guest mapping (one committed virtual range) `vaddr` lies in; 0 when none.
+ [[nodiscard]] uint64_t MappingEnd(uint64_t vaddr);
+diff --git a/tests/VirtualMemoryAllocationTests.cpp b/tests/VirtualMemoryAllocationTests.cpp
+index 14e6ef4..aecb3b1 100644
+--- a/tests/VirtualMemoryAllocationTests.cpp
++++ b/tests/VirtualMemoryAllocationTests.cpp
+@@ -538,6 +538,33 @@ void TestPrtBackingReadPreservesSparseResidency() {
+ 	      "PRT backing read crossed the registered aperture");
+ 
+ 	constexpr uint64_t unowned_prt = 0x5000000000ull;
++	// A streaming image descriptor may still span a layer whose reservation was
++	// released. Exercise the renderer's reader on real mappings, with distinct
++	// data on both sides, and preserve strict ownership rejection for other users.
++	CheckOk(test, Libs::LibKernel::Memory::KernelMunmap(base + commit_size, commit_size),
++	        "KernelMunmap(released image layer)");
++	const char* image_failure = nullptr;
++	Check(test, !Libs::LibKernel::Memory::TryReadPrtBacking(base, bytes.data(), bytes.size(), &image_failure) &&
++	                image_failure != nullptr && std::strcmp(image_failure, "missing-logical-ownership") == 0,
++	      "strict PRT reader accepted released ownership");
++	std::fill(bytes.begin(), bytes.end(), 0x5a);
++	Check(test, Libs::LibKernel::Memory::TryReadImageBacking(base, bytes.data(), bytes.size(), &image_failure) &&
++	                image_failure == nullptr,
++	      "image reader rejected a released layer inside its PRT aperture");
++	Check(test, std::all_of(bytes.begin(), bytes.begin() + commit_size, [](uint8_t v) { return v == 0x3c; }) &&
++	                std::all_of(bytes.begin() + commit_size, bytes.begin() + commit_size * 2,
++	                            [](uint8_t v) { return v == 0; }) &&
++	                std::all_of(bytes.begin() + commit_size * 2, bytes.end(), [](uint8_t v) { return v == 0xa7; }),
++	      "image read lost resident bytes or exposed released layer data");
++	void* released_layer = reinterpret_cast<void*>(base + commit_size);
++	CheckOk(test, Libs::LibKernel::Memory::KernelReserveVirtualRange(
++	                  &released_layer, commit_size, SceKernelMapFixed | SceKernelMapNoOverwrite, commit_size),
++	        "restore released layer reservation for cleanup");
++	Check(test, reinterpret_cast<uint64_t>(released_layer) == base + commit_size,
++	      "replacement reservation moved");
++	std::array<uint8_t, 16> outside {};
++	Check(test, !Libs::LibKernel::Memory::TryReadImageBacking(0x10000, outside.data(), outside.size()),
++	      "image reader accepted an unowned range outside the PRT aperture");
+ 	CheckOk(test,
+ 	        Libs::LibKernel::Memory::KernelSetPrtAperture(
+ 	            2, reinterpret_cast<void*>(unowned_prt), commit_size),
+@@ -2820,6 +2847,10 @@ void TestModuleRelocationUsesWritableHostMapping() {
+ 
+ int main(int argc, char** argv) {
+ 	InitSubsystems();
++	if (argc == 2 && std::strcmp(argv[1], "--prt-image-read-only") == 0) {
++		RunTest(TestPrtBackingReadPreservesSparseResidency);
++		return g_failed_tests == 0 ? 0 : 1;
++	}
+ 	if (argc == 2 && std::strcmp(argv[1], "--prt-direct-concurrent-only") == 0) {
+ 		RunTest(TestPrtBackingConcurrentDirectResidency);
+ 		return g_failed_tests == 0 ? 0 : 1;

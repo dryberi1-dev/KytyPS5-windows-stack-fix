@@ -1,3 +1,8 @@
+> **Experimental fixes for v20261021:** this branch contains a bounded driver-cache
+> budget override and sparse image backing reads. See
+> [LOCAL-FIXES-20261021.md](LOCAL-FIXES-20261021.md) for scope, application,
+> and validation limits. No prebuilt binary or complete stutter fix is claimed.
+
 > [!NOTE]
 > **This fork is tuned for Demon's Souls.** Its renderer, shader and memory paths are optimized for
 > **Demon's Souls (PS5, PPSA01341), game versions 1.07 (01.007.000) and 1.05 (01.005.000)**: both are
