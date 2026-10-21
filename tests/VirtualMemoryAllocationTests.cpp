@@ -538,6 +538,33 @@ void TestPrtBackingReadPreservesSparseResidency() {
 	      "PRT backing read crossed the registered aperture");
 
 	constexpr uint64_t unowned_prt = 0x5000000000ull;
+	// A streaming image descriptor may still span a layer whose reservation was
+	// released. Exercise the renderer's reader on real mappings, with distinct
+	// data on both sides, and preserve strict ownership rejection for other users.
+	CheckOk(test, Libs::LibKernel::Memory::KernelMunmap(base + commit_size, commit_size),
+	        "KernelMunmap(released image layer)");
+	const char* image_failure = nullptr;
+	Check(test, !Libs::LibKernel::Memory::TryReadPrtBacking(base, bytes.data(), bytes.size(), &image_failure) &&
+	                image_failure != nullptr && std::strcmp(image_failure, "missing-logical-ownership") == 0,
+	      "strict PRT reader accepted released ownership");
+	std::fill(bytes.begin(), bytes.end(), 0x5a);
+	Check(test, Libs::LibKernel::Memory::TryReadImageBacking(base, bytes.data(), bytes.size(), &image_failure) &&
+	                image_failure == nullptr,
+	      "image reader rejected a released layer inside its PRT aperture");
+	Check(test, std::all_of(bytes.begin(), bytes.begin() + commit_size, [](uint8_t v) { return v == 0x3c; }) &&
+	                std::all_of(bytes.begin() + commit_size, bytes.begin() + commit_size * 2,
+	                            [](uint8_t v) { return v == 0; }) &&
+	                std::all_of(bytes.begin() + commit_size * 2, bytes.end(), [](uint8_t v) { return v == 0xa7; }),
+	      "image read lost resident bytes or exposed released layer data");
+	void* released_layer = reinterpret_cast<void*>(base + commit_size);
+	CheckOk(test, Libs::LibKernel::Memory::KernelReserveVirtualRange(
+	                  &released_layer, commit_size, SceKernelMapFixed | SceKernelMapNoOverwrite, commit_size),
+	        "restore released layer reservation for cleanup");
+	Check(test, reinterpret_cast<uint64_t>(released_layer) == base + commit_size,
+	      "replacement reservation moved");
+	std::array<uint8_t, 16> outside {};
+	Check(test, !Libs::LibKernel::Memory::TryReadImageBacking(0x10000, outside.data(), outside.size()),
+	      "image reader accepted an unowned range outside the PRT aperture");
 	CheckOk(test,
 	        Libs::LibKernel::Memory::KernelSetPrtAperture(
 	            2, reinterpret_cast<void*>(unowned_prt), commit_size),
@@ -2820,6 +2847,10 @@ void TestModuleRelocationUsesWritableHostMapping() {
 
 int main(int argc, char** argv) {
 	InitSubsystems();
+	if (argc == 2 && std::strcmp(argv[1], "--prt-image-read-only") == 0) {
+		RunTest(TestPrtBackingReadPreservesSparseResidency);
+		return g_failed_tests == 0 ? 0 : 1;
+	}
 	if (argc == 2 && std::strcmp(argv[1], "--prt-direct-concurrent-only") == 0) {
 		RunTest(TestPrtBackingConcurrentDirectResidency);
 		return g_failed_tests == 0 ? 0 : 1;
