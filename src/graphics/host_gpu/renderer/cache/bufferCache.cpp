@@ -2356,8 +2356,7 @@ std::pair<Buffer*, uint64_t> BufferCache::ObtainBufferForImage(uint64_t vaddr, u
 	}
 	const char* prt_failure = "not-attempted";
 	ApplyImageProtects();
-	if (staging == nullptr || (!Libs::LibKernel::Memory::TryReadBacking(vaddr, staging, size) &&
-	                           !Libs::LibKernel::Memory::TryReadPrtBacking(vaddr, staging, size, &prt_failure))) {
+	if (staging == nullptr || !Libs::LibKernel::Memory::TryReadImageBacking(vaddr, staging, size, &prt_failure)) {
 		EXIT("BufferCache: failed to read mapped guest image backing: "
 		     "address=0x%016" PRIx64 " size=0x%016" PRIx64
 		     " staging=%p staging_capacity=0x%016" PRIx64 " mapped=%u prt_failure=%s\n",
